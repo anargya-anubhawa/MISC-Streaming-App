@@ -14,7 +14,7 @@ export const metadata: Metadata = {
     siteName: "MISC Streaming App",
     images: [
       {
-        url: "/thumbnail.jpg",
+        url: "https://misc.altheora.web.id/thumbnail.jpg",
         width: 1200,
         height: 630,
         alt: "MISC Streaming App",
