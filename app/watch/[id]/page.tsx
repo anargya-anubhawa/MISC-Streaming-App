@@ -111,7 +111,7 @@ export default function WatchPage() {
 
   useEffect(() => {
     const init = async () => {
-      const user = await guardUser({ requireUnlock: true });
+      const user = await guardUser();
       if (!user) return;
 
       const userSnap = await getDoc(doc(db, "users", user.uid));
