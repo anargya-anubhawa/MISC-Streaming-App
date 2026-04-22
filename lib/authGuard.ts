@@ -12,7 +12,14 @@ import {
 } from "firebase/firestore";
 
 /**
- * Tunggu sampai Firebase Auth siap
+ * OPTIONS TYPE
+ */
+type GuardOptions = {
+  requireUnlock?: boolean;
+};
+
+/**
+ * Tunggu Firebase Auth siap
  */
 function waitForAuth(): Promise<User | null> {
   return new Promise((resolve) => {
@@ -33,7 +40,7 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Ambil data user dengan retry (hindari race condition)
+ * Retry ambil data user (hindari race condition)
  */
 async function getUserDataWithRetry(
   uid: string,
@@ -44,8 +51,7 @@ async function getUserDataWithRetry(
 
   for (let i = 0; i < retries; i++) {
     try {
-      const ref = doc(db, "users", uid);
-      const snap = await getDoc(ref);
+      const snap = await getDoc(doc(db, "users", uid));
 
       if (snap.exists()) {
         return snap.data();
@@ -61,7 +67,7 @@ async function getUserDataWithRetry(
 }
 
 /**
- * Redirect ke login + cleanup session
+ * Redirect + cleanup
  */
 async function redirectToLogin(reason?: string): Promise<null> {
   try {
@@ -87,11 +93,15 @@ async function redirectToLogin(reason?: string): Promise<null> {
 }
 
 /**
- * Guard utama (ANTI RACE CONDITION)
+ * 🔥 MAIN GUARD (sudah support options)
  */
-export async function guardUser(): Promise<User | null> {
+export async function guardUser(
+  options: GuardOptions = {}
+): Promise<User | null> {
   try {
-    // 1. Tunggu auth siap
+    const { requireUnlock = false } = options;
+
+    // 1. Tunggu auth ready
     const user = await waitForAuth();
 
     if (!user) {
@@ -104,11 +114,11 @@ export async function guardUser(): Promise<User | null> {
     try {
       localSessionId = localStorage.getItem("sessionId");
     } catch (error) {
-      console.error("Error reading localStorage:", error);
+      console.error("Error localStorage:", error);
     }
 
-    // 3. Ambil data user firestore (retry)
-    const userData = await getUserDataWithRetry(user.uid, 3, 300);
+    // 3. Ambil user data
+    const userData = await getUserDataWithRetry(user.uid);
 
     if (!userData) {
       return await redirectToLogin("User data tidak ditemukan");
@@ -124,28 +134,40 @@ export async function guardUser(): Promise<User | null> {
 
     // 4. Validasi session
     if (!localSessionId || localSessionId !== firestoreSessionId) {
-      console.warn("Session mismatch detected");
+      console.warn("Session mismatch");
 
-      // 🔥 retry sekali (hindari race setelah login)
+      // retry sekali (race condition fix)
       await delay(500);
 
       const retryData = await getUserDataWithRetry(user.uid, 2, 300);
       const retrySessionId = retryData?.activeSessionId || null;
 
-      console.log("RETRY SESSION CHECK:", {
+      console.log("RETRY CHECK:", {
         localSessionId,
         retrySessionId,
       });
 
       if (localSessionId && localSessionId === retrySessionId) {
-        console.log("Session valid after retry");
         return user;
       }
 
-      return await redirectToLogin("Session tidak valid");
+      return await redirectToLogin("Session invalid");
     }
 
-    // 5. Aman
+    // 5. OPTIONAL: requireUnlock logic
+    if (requireUnlock) {
+      if (!userData.isUnlocked) {
+        console.warn("User belum unlock");
+
+        // kamu bisa redirect ke halaman unlock kalau ada
+        if (typeof window !== "undefined") {
+          window.location.href = "/unlock";
+        }
+
+        return null;
+      }
+    }
+
     return user;
   } catch (error) {
     console.error("guardUser error:", error);
