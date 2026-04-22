@@ -153,6 +153,7 @@ export default function AdminPage() {
     if (!sessionId) return;
 
     const newToken = await resetUnlockToken(sessionId);
+    if (!newToken) return;
     setTokens((previous) => ({
       ...previous,
       [sessionId]: newToken,
