@@ -1,137 +1,79 @@
+import { db } from "./firebase";
 import {
+  deleteDoc,
   doc,
-  setDoc,
   getDoc,
-  getFirestore,
-  serverTimestamp,
+  setDoc,
 } from "firebase/firestore";
 
-/**
- * Ambil instance Firestore (tanpa tergantung firebase.ts export)
- */
-function getDB() {
-  return getFirestore();
+function generateUnlockToken() {
+  return Math.random().toString(36).slice(2); // 🔥 fallback aman
 }
 
-/**
- * Delay helper
- */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * CREATE SESSION
- */
-export async function createSession(userId: string): Promise<string> {
-  const db = getDB();
-
+async function safeHash(token: string) {
   try {
-    const sessionId = crypto.randomUUID();
-
-    console.log("CREATE SESSION START:", {
-      userId,
-      sessionId,
-    });
-
-    // simpan ke localStorage dulu
-    localStorage.setItem("sessionId", sessionId);
-
-    // simpan ke Firestore
-    await setDoc(
-      doc(db, "users", userId),
-      {
-        activeSessionId: sessionId,
-        lastLogin: serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    console.log("CREATE SESSION SUCCESS");
-
-    return sessionId;
-  } catch (error) {
-    console.error("CREATE SESSION ERROR:", error);
-
-    // rollback kalau gagal
-    localStorage.removeItem("sessionId");
-
-    throw error;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(token);
+    const hash = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hash))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return token; // fallback
   }
 }
 
-/**
- * GET LOCAL SESSION
- */
-export function getLocalSession(): string | null {
+async function getPublicIp() {
   try {
-    return localStorage.getItem("sessionId");
-  } catch (error) {
-    console.error("GET LOCAL SESSION ERROR:", error);
-    return null;
+    const res = await fetch("https://api.ipify.org?format=json");
+    const data = await res.json();
+    return data.ip || "unknown";
+  } catch {
+    return "unknown"; // 🔥 jangan bikin login gagal
   }
 }
 
-/**
- * CLEAR LOCAL SESSION
- */
-export function clearSession(): void {
-  try {
-    localStorage.removeItem("sessionId");
-    console.log("SESSION CLEARED");
-  } catch (error) {
-    console.error("CLEAR SESSION ERROR:", error);
-  }
-}
+export async function createSession(
+  uid: string,
+  sessionId: string,
+  deviceInfo: string,
+  deviceId: string,
+  email: string
+) {
+  const userRef = doc(db, "users", uid);
+  const userSnap = await getDoc(userRef);
+  if (!userSnap.exists()) return;
 
-/**
- * GET USER SESSION FROM FIRESTORE
- */
-export async function getUserSession(
-  userId: string,
-  retry: number = 2
-): Promise<string | null> {
-  const db = getDB();
+  const userData: any = userSnap.data();
 
-  for (let i = 0; i < retry; i++) {
-    try {
-      const snap = await getDoc(doc(db, "users", userId));
+  const token = generateUnlockToken();
+  const tokenHash = await safeHash(token);
+  const ip = await getPublicIp();
 
-      if (snap.exists()) {
-        const data = snap.data();
-        return data.activeSessionId || null;
-      }
-    } catch (error) {
-      console.error("GET USER SESSION ERROR:", error);
-    }
-
-    await delay(300);
+  // hapus session lama
+  if (userData.activeSessionId) {
+    await deleteDoc(doc(db, "sessions", userData.activeSessionId)).catch(() => {});
   }
 
-  return null;
-}
+  await setDoc(doc(db, "sessions", sessionId), {
+    uid,
+    email,
+    deviceInfo,
+    deviceId,
+    ip,
+    createdAt: new Date(),
+    unlockTokenHash: tokenHash,
+    isUnlocked: false,
+  });
 
-/**
- * VALIDATE SESSION (helper)
- */
-export async function isSessionValid(
-  userId: string
-): Promise<boolean> {
-  try {
-    const localSession = getLocalSession();
+  await setDoc(
+    userRef,
+    {
+      activeSessionId: sessionId,
+      lastLogin: new Date(),
+    },
+    { merge: true }
+  );
 
-    if (!localSession) return false;
-
-    const firestoreSession = await getUserSession(userId);
-
-    console.log("VALIDATE SESSION:", {
-      localSession,
-      firestoreSession,
-    });
-
-    return localSession === firestoreSession;
-  } catch (error) {
-    console.error("VALIDATE SESSION ERROR:", error);
-    return false;
-  }
+  return token;
 }
