@@ -1,19 +1,23 @@
 import {
   onAuthStateChanged,
   signOut,
+  getAuth,
   User,
 } from "firebase/auth";
+
 import {
   doc,
   getDoc,
+  getFirestore,
 } from "firebase/firestore";
-import { auth, db } from "./firebase";
 
 /**
  * Tunggu sampai Firebase Auth siap
  */
 function waitForAuth(): Promise<User | null> {
   return new Promise((resolve) => {
+    const auth = getAuth();
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       unsubscribe();
       resolve(user);
@@ -29,13 +33,15 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Ambil user data dengan retry (hindari race condition Firestore)
+ * Ambil data user dengan retry (hindari race condition)
  */
 async function getUserDataWithRetry(
   uid: string,
   retries: number = 3,
   interval: number = 300
 ): Promise<any | null> {
+  const db = getFirestore();
+
   for (let i = 0; i < retries; i++) {
     try {
       const ref = doc(db, "users", uid);
@@ -61,6 +67,7 @@ async function redirectToLogin(reason?: string): Promise<null> {
   try {
     console.warn("Redirecting to login:", reason);
 
+    const auth = getAuth();
     await signOut(auth);
   } catch (error) {
     console.error("Error signOut:", error);
@@ -80,7 +87,7 @@ async function redirectToLogin(reason?: string): Promise<null> {
 }
 
 /**
- * Guard utama
+ * Guard utama (ANTI RACE CONDITION)
  */
 export async function guardUser(): Promise<User | null> {
   try {
@@ -100,7 +107,7 @@ export async function guardUser(): Promise<User | null> {
       console.error("Error reading localStorage:", error);
     }
 
-    // 3. Ambil data firestore (dengan retry)
+    // 3. Ambil data user firestore (retry)
     const userData = await getUserDataWithRetry(user.uid, 3, 300);
 
     if (!userData) {
@@ -119,11 +126,10 @@ export async function guardUser(): Promise<User | null> {
     if (!localSessionId || localSessionId !== firestoreSessionId) {
       console.warn("Session mismatch detected");
 
-      // 🔥 Retry sekali (hindari race condition setelah login)
+      // 🔥 retry sekali (hindari race setelah login)
       await delay(500);
 
       const retryData = await getUserDataWithRetry(user.uid, 2, 300);
-
       const retrySessionId = retryData?.activeSessionId || null;
 
       console.log("RETRY SESSION CHECK:", {
@@ -139,7 +145,7 @@ export async function guardUser(): Promise<User | null> {
       return await redirectToLogin("Session tidak valid");
     }
 
-    // 5. Semua aman
+    // 5. Aman
     return user;
   } catch (error) {
     console.error("guardUser error:", error);
