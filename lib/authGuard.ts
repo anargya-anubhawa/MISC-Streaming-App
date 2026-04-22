@@ -1,122 +1,76 @@
-import {
-  onAuthStateChanged,
-  signOut,
-  getAuth,
-  User,
-} from "firebase/auth";
+"use client";
 
-import {
-  doc,
-  getDoc,
-  getFirestore,
-} from "firebase/firestore";
+import { getAuth, onAuthStateChanged, signOut } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
+import { db } from "./firebase";
+import type { AppUserRecord, SessionRecord } from "./types";
 
-type GuardOptions = {
-  requireUnlock?: boolean;
-};
-
-function waitForAuth(): Promise<User | null> {
+function waitForAuthState(auth: any) {
   return new Promise((resolve) => {
-    const auth = getAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      unsubscribe();
+    const unsub = onAuthStateChanged(auth, (user) => {
+      unsub();
       resolve(user);
     });
   });
 }
 
-function delay(ms: number) {
-  return new Promise((res) => setTimeout(res, ms));
+async function redirectToLogin(auth: any, message?: string) {
+  if (message) alert(message);
+  localStorage.removeItem("sessionId");
+  await signOut(auth).catch(() => {});
+  window.location.replace("/login");
 }
 
-async function getUserData(uid: string) {
-  const db = getFirestore();
+export async function guardUser() {
+  const auth = getAuth();
+  const user: any = await waitForAuthState(auth);
 
-  try {
-    const snap = await getDoc(doc(db, "users", uid));
-
-    if (!snap.exists()) return null;
-
-    return snap.data();
-  } catch (error) {
-    console.error("GET USER ERROR:", error);
+  if (!user) {
+    window.location.replace("/login");
     return null;
   }
-}
-
-async function redirectToLogin(reason?: string) {
-  console.warn("REDIRECT LOGIN:", reason);
 
   try {
-    const auth = getAuth();
-    await signOut(auth);
-  } catch (error) {
-    console.error("SIGNOUT ERROR:", error);
-  }
+    const userSnap = await getDoc(doc(db, "users", user.uid));
 
-  localStorage.removeItem("sessionId");
-
-  if (typeof window !== "undefined") {
-    window.location.href = "/login";
-  }
-
-  return null;
-}
-
-export async function guardUser(
-  options: GuardOptions = {}
-): Promise<User | null> {
-  try {
-    const user = await waitForAuth();
-
-    if (!user) {
-      return redirectToLogin("Belum login");
+    if (!userSnap.exists()) {
+      await redirectToLogin(auth);
+      return null;
     }
+
+    const userData = userSnap.data() as AppUserRecord;
 
     const localSessionId = localStorage.getItem("sessionId");
 
-    const userData = await getUserData(user.uid);
-
-    if (!userData) {
-      return redirectToLogin("User tidak ditemukan");
+    // 🔥 FIX: jangan langsung logout kalau session belum kebentuk
+    if (!localSessionId) {
+      console.warn("No session yet, allow temporary access");
+      return user;
     }
 
-    const firestoreSessionId = userData.activeSessionId;
-
-    console.log("SESSION CHECK:", {
-      localSessionId,
-      firestoreSessionId,
-    });
-
-    // 🔥 FIX UTAMA: retry biar gak false logout
-    if (!localSessionId || localSessionId !== firestoreSessionId) {
-      console.warn("SESSION MISMATCH");
-
-      await delay(500);
-
-      const retryData = await getUserData(user.uid);
-
-      if (
-        retryData &&
-        localSessionId === retryData.activeSessionId
-      ) {
-        console.log("SESSION OK AFTER RETRY");
-        return user;
-      }
-
-      return redirectToLogin("Session invalid");
+    if (localSessionId !== userData.activeSessionId) {
+      await redirectToLogin(auth, "Session tidak valid");
+      return null;
     }
 
-    // optional unlock
-    if (options.requireUnlock && !userData.isUnlocked) {
-      window.location.href = "/unlock";
+    const sessionSnap = await getDoc(doc(db, "sessions", localSessionId));
+
+    if (!sessionSnap.exists()) {
+      console.warn("Session doc missing, allow temporary");
+      return user;
+    }
+
+    const sessionData = sessionSnap.data() as SessionRecord;
+
+    if (sessionData.uid !== user.uid) {
+      await redirectToLogin(auth);
       return null;
     }
 
     return user;
-  } catch (error) {
-    console.error("GUARD ERROR:", error);
-    return redirectToLogin("Error");
+  } catch (err) {
+    console.error(err);
+    await redirectToLogin(auth);
+    return null;
   }
 }
