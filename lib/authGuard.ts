@@ -11,16 +11,10 @@ import {
   getFirestore,
 } from "firebase/firestore";
 
-/**
- * OPTIONS TYPE
- */
 type GuardOptions = {
   requireUnlock?: boolean;
 };
 
-/**
- * Tunggu Firebase Auth siap
- */
 function waitForAuth(): Promise<User | null> {
   return new Promise((resolve) => {
     const auth = getAuth();
@@ -32,58 +26,36 @@ function waitForAuth(): Promise<User | null> {
   });
 }
 
-/**
- * Delay helper
- */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number) {
+  return new Promise((res) => setTimeout(res, ms));
 }
 
-/**
- * Retry ambil data user (hindari race condition)
- */
-async function getUserDataWithRetry(
-  uid: string,
-  retries: number = 3,
-  interval: number = 300
-): Promise<any | null> {
+async function getUserData(uid: string) {
   const db = getFirestore();
 
-  for (let i = 0; i < retries; i++) {
-    try {
-      const snap = await getDoc(doc(db, "users", uid));
+  try {
+    const snap = await getDoc(doc(db, "users", uid));
 
-      if (snap.exists()) {
-        return snap.data();
-      }
-    } catch (error) {
-      console.error("Error get user data:", error);
-    }
+    if (!snap.exists()) return null;
 
-    await delay(interval);
+    return snap.data();
+  } catch (error) {
+    console.error("GET USER ERROR:", error);
+    return null;
   }
-
-  return null;
 }
 
-/**
- * Redirect + cleanup
- */
-async function redirectToLogin(reason?: string): Promise<null> {
-  try {
-    console.warn("Redirecting to login:", reason);
+async function redirectToLogin(reason?: string) {
+  console.warn("REDIRECT LOGIN:", reason);
 
+  try {
     const auth = getAuth();
     await signOut(auth);
   } catch (error) {
-    console.error("Error signOut:", error);
+    console.error("SIGNOUT ERROR:", error);
   }
 
-  try {
-    localStorage.removeItem("sessionId");
-  } catch (error) {
-    console.error("Error clearing localStorage:", error);
-  }
+  localStorage.removeItem("sessionId");
 
   if (typeof window !== "undefined") {
     window.location.href = "/login";
@@ -92,85 +64,59 @@ async function redirectToLogin(reason?: string): Promise<null> {
   return null;
 }
 
-/**
- * 🔥 MAIN GUARD (sudah support options)
- */
 export async function guardUser(
   options: GuardOptions = {}
 ): Promise<User | null> {
   try {
-    const { requireUnlock = false } = options;
-
-    // 1. Tunggu auth ready
     const user = await waitForAuth();
 
     if (!user) {
-      return await redirectToLogin("User belum login");
+      return redirectToLogin("Belum login");
     }
 
-    // 2. Ambil session lokal
-    let localSessionId: string | null = null;
+    const localSessionId = localStorage.getItem("sessionId");
 
-    try {
-      localSessionId = localStorage.getItem("sessionId");
-    } catch (error) {
-      console.error("Error localStorage:", error);
-    }
-
-    // 3. Ambil user data
-    const userData = await getUserDataWithRetry(user.uid);
+    const userData = await getUserData(user.uid);
 
     if (!userData) {
-      return await redirectToLogin("User data tidak ditemukan");
+      return redirectToLogin("User tidak ditemukan");
     }
 
-    const firestoreSessionId = userData.activeSessionId || null;
+    const firestoreSessionId = userData.activeSessionId;
 
     console.log("SESSION CHECK:", {
-      uid: user.uid,
       localSessionId,
       firestoreSessionId,
     });
 
-    // 4. Validasi session
+    // 🔥 FIX UTAMA: retry biar gak false logout
     if (!localSessionId || localSessionId !== firestoreSessionId) {
-      console.warn("Session mismatch");
+      console.warn("SESSION MISMATCH");
 
-      // retry sekali (race condition fix)
       await delay(500);
 
-      const retryData = await getUserDataWithRetry(user.uid, 2, 300);
-      const retrySessionId = retryData?.activeSessionId || null;
+      const retryData = await getUserData(user.uid);
 
-      console.log("RETRY CHECK:", {
-        localSessionId,
-        retrySessionId,
-      });
-
-      if (localSessionId && localSessionId === retrySessionId) {
+      if (
+        retryData &&
+        localSessionId === retryData.activeSessionId
+      ) {
+        console.log("SESSION OK AFTER RETRY");
         return user;
       }
 
-      return await redirectToLogin("Session invalid");
+      return redirectToLogin("Session invalid");
     }
 
-    // 5. OPTIONAL: requireUnlock logic
-    if (requireUnlock) {
-      if (!userData.isUnlocked) {
-        console.warn("User belum unlock");
-
-        // kamu bisa redirect ke halaman unlock kalau ada
-        if (typeof window !== "undefined") {
-          window.location.href = "/unlock";
-        }
-
-        return null;
-      }
+    // optional unlock
+    if (options.requireUnlock && !userData.isUnlocked) {
+      window.location.href = "/unlock";
+      return null;
     }
 
     return user;
   } catch (error) {
-    console.error("guardUser error:", error);
-    return await redirectToLogin("Unexpected error");
+    console.error("GUARD ERROR:", error);
+    return redirectToLogin("Error");
   }
 }
