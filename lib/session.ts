@@ -1,46 +1,70 @@
 import { db } from "./firebase";
 import {
+  collection,
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
+  query,
   setDoc,
   updateDoc,
+  where,
 } from "firebase/firestore";
-
-/* ========================
-   HELPERS
-======================== */
+import type { AppUserRecord } from "./types";
 
 function generateUnlockToken() {
-  return Math.random().toString(36).slice(2);
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+
+  return Array.from(array, (value) =>
+    value.toString(16).padStart(2, "0")
+  ).join("");
 }
 
-async function safeHash(token: string) {
-  try {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(token);
-    const hash = await crypto.subtle.digest("SHA-256", data);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-  } catch {
-    return token;
-  }
+async function hashToken(token: string) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+
+  return hashArray.map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 async function getPublicIp() {
   try {
-    const res = await fetch("https://api.ipify.org?format=json");
-    const data = await res.json();
-    return data.ip || "unknown";
+    const response = await fetch("https://api.ipify.org?format=json");
+    const data = (await response.json()) as { ip?: string };
+    return data.ip || "Tidak tersedia";
   } catch {
-    return "unknown";
+    return "Tidak tersedia";
   }
 }
 
-/* ========================
-   CREATE SESSION
-======================== */
+async function deleteSessionsForUser(uid: string) {
+  const sessionsQuery = query(
+    collection(db, "sessions"),
+    where("uid", "==", uid)
+  );
+  const sessionsSnap = await getDocs(sessionsQuery);
+
+  await Promise.all(
+    sessionsSnap.docs.map((sessionDoc) => deleteDoc(sessionDoc.ref))
+  );
+}
+
+export async function checkUserStatus(uid: string) {
+  const snap = await getDoc(doc(db, "users", uid));
+  if (!snap.exists()) return null;
+  return snap.data();
+}
+
+export async function isProfileComplete(uid: string): Promise<boolean> {
+  const snap = await getDoc(doc(db, "users", uid));
+  if (!snap.exists()) return false;
+
+  const data = snap.data() as AppUserRecord;
+  return Boolean(data.name && data.nim && data.phone);
+}
 
 export async function createSession(
   uid: string,
@@ -51,17 +75,16 @@ export async function createSession(
 ) {
   const userRef = doc(db, "users", uid);
   const userSnap = await getDoc(userRef);
-  if (!userSnap.exists()) return;
-
-  const userData: any = userSnap.data();
-
-  const token = generateUnlockToken();
-  const tokenHash = await safeHash(token);
+  const userData = userSnap.data() as AppUserRecord | undefined;
   const ip = await getPublicIp();
+  const token = generateUnlockToken();
+  const tokenHash = await hashToken(token);
 
-  // hapus session lama
-  if (userData.activeSessionId) {
-    await deleteDoc(doc(db, "sessions", userData.activeSessionId)).catch(() => {});
+  if (!userSnap.exists() || !userData) return;
+  if (userData.role !== "admin" && userData.activeSessionId) {
+    await deleteDoc(doc(db, "sessions", userData.activeSessionId)).catch(
+      () => undefined
+    );
   }
 
   await setDoc(doc(db, "sessions", sessionId), {
@@ -72,14 +95,19 @@ export async function createSession(
     ip,
     createdAt: new Date(),
     unlockTokenHash: tokenHash,
+    unlockAttempts: 0,
     isUnlocked: false,
   });
 
   await setDoc(
     userRef,
     {
+      email,
       activeSessionId: sessionId,
+      deviceInfo,
+      deviceId,
       lastLogin: new Date(),
+      isFrozen: false,
     },
     { merge: true }
   );
@@ -87,44 +115,25 @@ export async function createSession(
   return token;
 }
 
-/* ========================
-   🔥 FIX 1: LOGOUT ALL
-======================== */
-
-export async function logoutAllSessions(uid: string) {
-  const userRef = doc(db, "users", uid);
-  const userSnap = await getDoc(userRef);
-
-  if (!userSnap.exists()) return;
-
-  const userData: any = userSnap.data();
-
-  if (userData.activeSessionId) {
-    await deleteDoc(doc(db, "sessions", userData.activeSessionId)).catch(() => {});
-  }
-
-  await updateDoc(userRef, {
-    activeSessionId: null,
-  });
-}
-
-/* ========================
-   🔥 FIX 2: RESET TOKEN
-======================== */
-
 export async function resetUnlockToken(sessionId: string) {
-  const sessionRef = doc(db, "sessions", sessionId);
-  const sessionSnap = await getDoc(sessionRef);
+  const token = generateUnlockToken();
+  const tokenHash = await hashToken(token);
 
-  if (!sessionSnap.exists()) return null;
-
-  const newToken = generateUnlockToken();
-  const newHash = await safeHash(newToken);
-
-  await updateDoc(sessionRef, {
-    unlockTokenHash: newHash,
+  await updateDoc(doc(db, "sessions", sessionId), {
+    unlockTokenHash: tokenHash,
+    unlockAttempts: 0,
     isUnlocked: false,
   });
 
-  return newToken;
+  return token;
+}
+
+export async function logoutAllSessions(uid: string) {
+  await deleteSessionsForUser(uid);
+
+  await setDoc(
+    doc(db, "users", uid),
+    { activeSessionId: "" },
+    { merge: true }
+  );
 }

@@ -54,7 +54,7 @@ export default function BlokPage() {
 
   useEffect(() => {
     const fetchVideos = async () => {
-      const user = await guardUser();
+      const user = await guardUser({ requireUnlock: true });
       if (!user) return;
 
       // Nama blok dan daftar videonya diambil bersamaan agar halaman terasa utuh.

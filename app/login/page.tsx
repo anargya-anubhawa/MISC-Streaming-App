@@ -38,17 +38,13 @@ export default function LoginPage() {
 
       localStorage.setItem("sessionId", sessionId);
 
-      try {
-  await createSession(
-    user.uid,
-    sessionId,
-    deviceInfo,
-    deviceId,
-    user.email || ""
-  );
-} catch (err) {
-  console.error("SESSION ERROR:", err);
-}
+      await createSession(
+        user.uid,
+        sessionId,
+        deviceInfo,
+        deviceId,
+        user.email || ""
+      );
 
       window.location.href = "/dashboard";
     } catch (error) {

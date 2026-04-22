@@ -1,29 +1,38 @@
 "use client";
 
+import type { Auth, User } from "firebase/auth";
 import { getAuth, onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "./firebase";
 import type { AppUserRecord, SessionRecord } from "./types";
 
-function waitForAuthState(auth: any) {
-  return new Promise((resolve) => {
-    const unsub = onAuthStateChanged(auth, (user) => {
-      unsub();
+interface GuardUserOptions {
+  requireUnlock?: boolean;
+}
+
+function waitForAuthState(auth: Auth) {
+  return new Promise<User | null>((resolve) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      unsubscribe();
       resolve(user);
     });
   });
 }
 
-async function redirectToLogin(auth: any, message?: string) {
-  if (message) alert(message);
+async function redirectToLogin(auth: Auth, message?: string) {
+  if (message) {
+    alert(message);
+  }
+
   localStorage.removeItem("sessionId");
-  await signOut(auth).catch(() => {});
+  await signOut(auth).catch(() => undefined);
   window.location.replace("/login");
 }
 
-export async function guardUser() {
+export async function guardUser(options: GuardUserOptions = {}) {
   const auth = getAuth();
-  const user: any = await waitForAuthState(auth);
+  const user = await waitForAuthState(auth);
+  const { requireUnlock = false } = options;
 
   if (!user) {
     window.location.replace("/login");
@@ -31,6 +40,7 @@ export async function guardUser() {
   }
 
   try {
+    // Profil user dipakai untuk menentukan role, status akun, dan session aktif.
     const userSnap = await getDoc(doc(db, "users", user.uid));
 
     if (!userSnap.exists()) {
@@ -38,38 +48,76 @@ export async function guardUser() {
       return null;
     }
 
-    const userData = userSnap.data() as AppUserRecord;
+    const userData = {
+      id: userSnap.id,
+      ...userSnap.data(),
+    } as AppUserRecord;
 
-    const localSessionId = localStorage.getItem("sessionId");
+    if (userData.isFrozen) {
+      await redirectToLogin(auth, "Akun dibekukan");
+      return null;
+    }
 
-    // 🔥 FIX: jangan langsung logout kalau session belum kebentuk
-    if (!localSessionId) {
-      console.warn("No session yet, allow temporary access");
+    // Admin tetap bisa masuk tanpa gerbang profil/unlock agar panel tetap terjangkau.
+    if (userData.role === "admin") {
       return user;
     }
 
-    if (localSessionId !== userData.activeSessionId) {
+    const localSessionId = localStorage.getItem("sessionId");
+    if (!localSessionId || localSessionId !== userData.activeSessionId) {
+      await redirectToLogin(auth, "Session berakhir atau login dilakukan di device lain");
+      return null;
+    }
+
+    // Session user biasa harus cocok dengan dokumen sesi yang terdaftar di Firestore.
+    const sessionSnap = await getDoc(doc(db, "sessions", localSessionId));
+    if (!sessionSnap.exists()) {
+      await redirectToLogin(auth, "Session tidak ditemukan");
+      return null;
+    }
+
+    const sessionData = {
+      id: sessionSnap.id,
+      ...sessionSnap.data(),
+    } as SessionRecord;
+
+    if (sessionData.uid !== user.uid) {
       await redirectToLogin(auth, "Session tidak valid");
       return null;
     }
 
-    const sessionSnap = await getDoc(doc(db, "sessions", localSessionId));
+    const currentPath = window.location.pathname;
+    const isProfileComplete = Boolean(
+      userData.name && userData.nim && userData.phone
+    );
 
-    if (!sessionSnap.exists()) {
-      console.warn("Session doc missing, allow temporary");
-      return user;
+    if (!isProfileComplete && currentPath !== "/complete-profile") {
+      window.location.replace("/complete-profile");
+      return null;
     }
 
-    const sessionData = sessionSnap.data() as SessionRecord;
+    if (isProfileComplete && currentPath === "/complete-profile") {
+      window.location.replace("/dashboard");
+      return null;
+    }
 
-    if (sessionData.uid !== user.uid) {
-      await redirectToLogin(auth);
+    const nextPath = `${currentPath}${window.location.search}`;
+
+    if (requireUnlock && !sessionData.isUnlocked && currentPath !== "/unlock") {
+      window.location.replace(`/unlock?next=${encodeURIComponent(nextPath)}`);
+      return null;
+    }
+
+    if (sessionData.isUnlocked && currentPath === "/unlock") {
+      const params = new URLSearchParams(window.location.search);
+      const redirectPath = params.get("next") || "/dashboard";
+      window.location.replace(redirectPath);
       return null;
     }
 
     return user;
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    console.error("Auth guard error:", error);
     await redirectToLogin(auth);
     return null;
   }
