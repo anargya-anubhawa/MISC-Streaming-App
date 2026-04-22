@@ -1,17 +1,19 @@
-"use client";
+import {
+  onAuthStateChanged,
+  signOut,
+  User,
+} from "firebase/auth";
+import {
+  doc,
+  getDoc,
+} from "firebase/firestore";
+import { auth, db } from "./firebase";
 
-import type { Auth, User } from "firebase/auth";
-import { getAuth, onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
-import { db } from "./firebase";
-import type { AppUserRecord, SessionRecord } from "./types";
-
-interface GuardUserOptions {
-  requireUnlock?: boolean;
-}
-
-function waitForAuthState(auth: Auth) {
-  return new Promise<User | null>((resolve) => {
+/**
+ * Tunggu sampai Firebase Auth siap
+ */
+function waitForAuth(): Promise<User | null> {
+  return new Promise((resolve) => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       unsubscribe();
       resolve(user);
@@ -19,106 +21,128 @@ function waitForAuthState(auth: Auth) {
   });
 }
 
-async function redirectToLogin(auth: Auth, message?: string) {
-  if (message) {
-    alert(message);
-  }
-
-  localStorage.removeItem("sessionId");
-  await signOut(auth).catch(() => undefined);
-  window.location.replace("/login");
+/**
+ * Delay helper
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function guardUser(options: GuardUserOptions = {}) {
-  const auth = getAuth();
-  const user = await waitForAuthState(auth);
-  const { requireUnlock = false } = options;
+/**
+ * Ambil user data dengan retry (hindari race condition Firestore)
+ */
+async function getUserDataWithRetry(
+  uid: string,
+  retries: number = 3,
+  interval: number = 300
+): Promise<any | null> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const ref = doc(db, "users", uid);
+      const snap = await getDoc(ref);
 
-  if (!user) {
-    window.location.replace("/login");
-    return null;
+      if (snap.exists()) {
+        return snap.data();
+      }
+    } catch (error) {
+      console.error("Error get user data:", error);
+    }
+
+    await delay(interval);
+  }
+
+  return null;
+}
+
+/**
+ * Redirect ke login + cleanup session
+ */
+async function redirectToLogin(reason?: string): Promise<null> {
+  try {
+    console.warn("Redirecting to login:", reason);
+
+    await signOut(auth);
+  } catch (error) {
+    console.error("Error signOut:", error);
   }
 
   try {
-    // Profil user dipakai untuk menentukan role, status akun, dan session aktif.
-    const userSnap = await getDoc(doc(db, "users", user.uid));
+    localStorage.removeItem("sessionId");
+  } catch (error) {
+    console.error("Error clearing localStorage:", error);
+  }
 
-    if (!userSnap.exists()) {
-      await redirectToLogin(auth);
-      return null;
+  if (typeof window !== "undefined") {
+    window.location.href = "/login";
+  }
+
+  return null;
+}
+
+/**
+ * Guard utama
+ */
+export async function guardUser(): Promise<User | null> {
+  try {
+    // 1. Tunggu auth siap
+    const user = await waitForAuth();
+
+    if (!user) {
+      return await redirectToLogin("User belum login");
     }
 
-    const userData = {
-      id: userSnap.id,
-      ...userSnap.data(),
-    } as AppUserRecord;
+    // 2. Ambil session lokal
+    let localSessionId: string | null = null;
 
-    if (userData.isFrozen) {
-      await redirectToLogin(auth, "Akun dibekukan");
-      return null;
+    try {
+      localSessionId = localStorage.getItem("sessionId");
+    } catch (error) {
+      console.error("Error reading localStorage:", error);
     }
 
-    // Admin tetap bisa masuk tanpa gerbang profil/unlock agar panel tetap terjangkau.
-    if (userData.role === "admin") {
-      return user;
+    // 3. Ambil data firestore (dengan retry)
+    const userData = await getUserDataWithRetry(user.uid, 3, 300);
+
+    if (!userData) {
+      return await redirectToLogin("User data tidak ditemukan");
     }
 
-    const localSessionId = localStorage.getItem("sessionId");
-    if (!localSessionId || localSessionId !== userData.activeSessionId) {
-      await redirectToLogin(auth, "Session berakhir atau login dilakukan di device lain");
-      return null;
+    const firestoreSessionId = userData.activeSessionId || null;
+
+    console.log("SESSION CHECK:", {
+      uid: user.uid,
+      localSessionId,
+      firestoreSessionId,
+    });
+
+    // 4. Validasi session
+    if (!localSessionId || localSessionId !== firestoreSessionId) {
+      console.warn("Session mismatch detected");
+
+      // 🔥 Retry sekali (hindari race condition setelah login)
+      await delay(500);
+
+      const retryData = await getUserDataWithRetry(user.uid, 2, 300);
+
+      const retrySessionId = retryData?.activeSessionId || null;
+
+      console.log("RETRY SESSION CHECK:", {
+        localSessionId,
+        retrySessionId,
+      });
+
+      if (localSessionId && localSessionId === retrySessionId) {
+        console.log("Session valid after retry");
+        return user;
+      }
+
+      return await redirectToLogin("Session tidak valid");
     }
 
-    // Session user biasa harus cocok dengan dokumen sesi yang terdaftar di Firestore.
-    const sessionSnap = await getDoc(doc(db, "sessions", localSessionId));
-    if (!sessionSnap.exists()) {
-      await redirectToLogin(auth, "Session tidak ditemukan");
-      return null;
-    }
-
-    const sessionData = {
-      id: sessionSnap.id,
-      ...sessionSnap.data(),
-    } as SessionRecord;
-
-    if (sessionData.uid !== user.uid) {
-      await redirectToLogin(auth, "Session tidak valid");
-      return null;
-    }
-
-    const currentPath = window.location.pathname;
-    const isProfileComplete = Boolean(
-      userData.name && userData.nim && userData.phone
-    );
-
-    if (!isProfileComplete && currentPath !== "/complete-profile") {
-      window.location.replace("/complete-profile");
-      return null;
-    }
-
-    if (isProfileComplete && currentPath === "/complete-profile") {
-      window.location.replace("/dashboard");
-      return null;
-    }
-
-    const nextPath = `${currentPath}${window.location.search}`;
-
-    if (requireUnlock && !sessionData.isUnlocked && currentPath !== "/unlock") {
-      window.location.replace(`/unlock?next=${encodeURIComponent(nextPath)}`);
-      return null;
-    }
-
-    if (sessionData.isUnlocked && currentPath === "/unlock") {
-      const params = new URLSearchParams(window.location.search);
-      const redirectPath = params.get("next") || "/dashboard";
-      window.location.replace(redirectPath);
-      return null;
-    }
-
+    // 5. Semua aman
     return user;
   } catch (error) {
-    console.error("Auth guard error:", error);
-    await redirectToLogin(auth);
-    return null;
+    console.error("guardUser error:", error);
+    return await redirectToLogin("Unexpected error");
   }
 }
