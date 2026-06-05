@@ -34,7 +34,7 @@ function getLoginErrorMessage(error: unknown) {
     case "auth/popup-blocked":
       return "Browser memblokir popup login. Izinkan popup lalu coba lagi.";
     case "auth/cancelled-popup-request":
-      return "Permintaan login sebelumnya dibatalkan. Coba sekali lagi.";
+      return "Permintaan login sebelumnya dibatalkan. Coba lagi.";
     case "auth/unauthorized-domain":
       return "Domain atau host ini belum diizinkan di Firebase Auth. Tambahkan host yang dipakai saat akses app ke Authorized domains Firebase.";
     default:
@@ -92,27 +92,6 @@ export default function LoginPage() {
 
   return (
     <div className="login-shell pb-12">
-      <section className="section-card login-panel">
-        <p className="eyebrow">Secure Sign In</p>
-        <div className="mt-5 space-y-4">
-          <h1 className="section-title text-3xl md:text-5xl">
-            Masuk ke ruang belajar yang lebih tenang dan terstruktur.
-          </h1>
-          <p className="section-lead">
-            Gunakan akun Google untuk masuk ke sistem MISC FK UMY 2025, lalu
-            lanjutkan ke dashboard materi, profil, dan proses aktivasi akses
-            video.
-          </p>
-        </div>
-
-        <div className="login-grid">
-          {loginHighlights.map((item) => (
-            <article key={item} className="login-feature">
-              <p className="section-lead text-sm">{item}</p>
-            </article>
-          ))}
-        </div>
-      </section>
 
       <section className="section-card login-panel">
         <div className="space-y-3 text-center">

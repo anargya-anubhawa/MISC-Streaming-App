@@ -384,6 +384,9 @@ html[data-theme="dark"] .theme-icon-sun,
 .page-shell {
   max-width: 76rem;
   margin: 0 auto;
+  overflow-x: hidden;
+  width: 100%;
+  min-width: 0;
 }
 
 .section-card,
@@ -1434,10 +1437,24 @@ body.watch-fullscreen main {
 
   .top-nav {
     overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
     max-width: calc(100vw - 7rem);
+  }
+
+  .top-nav::-webkit-scrollbar {
+    display: none;
   }
 
   .app-main {
     padding-top: 1.4rem;
+  }
+
+  .hero-panel {
+    padding: clamp(1.2rem, 3vw, 2rem);
+  }
+
+  .about-stat-card {
+    padding: 0.85rem;
   }
 }
